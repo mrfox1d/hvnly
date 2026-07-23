@@ -118,7 +118,6 @@ async def mark_work_done_db(channel_id: int):
 
 async def get_expired_orders_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # 259200 секунд = 3 суток
         async with db.execute("""
             SELECT channel_id, customer_id, service, difficulty, currency, price, designer_id 
             FROM orders 
@@ -268,7 +267,7 @@ class OrderModal(ui.Modal):
 
         try:
             ticket_channel = await guild.create_text_channel(
-                name=f"заказ-{customer.display_name}",
+                name=f"🛒・{customer.display_name}",
                 category=category,
                 overwrites=overwrites,
                 reason=f"Заказ от {customer}",
@@ -300,7 +299,7 @@ class OrderModal(ui.Modal):
                 f"**📝 Техническое задание:**\n{task}\n\n"
                 f"**💰 Рассчитанная стоимость:** `{final_price}` {symbol}\n\n"
                 f"**📦 Реквизиты для оплаты:**\n{REQUISITES[self.currency]}\n\n"
-                "-# После оплаты нажмите «Оплата получена» (выполняется администрацией)."
+                f"-# После оплаты нажмите «Оплата получена» (выполняется администрацией)."
             )
         )
         ticket_embed.set_author(name=guild.name, icon_url=guild.icon.url)
@@ -316,7 +315,7 @@ class OrderModal(ui.Modal):
             description=(
                 f"### ✅ Тикет создан!\n"
                 f"Перейдите в канал {ticket_channel.mention} — там указаны подробности заказа и реквизиты.\n\n"
-                "-# Как оплатите, сообщите администратору в тикете."
+                f"-# Как оплатите, сообщите администратору в тикете."
             )
         )
         done_embed.set_footer(text="Heavenly Design © 2026")
@@ -350,6 +349,7 @@ class TicketControlView(ui.View):
 
         await inter.response.edit_message(view=self)
 
+        customer_mention = f"<@{order['customer_id']}>"
         designer_embed = Embed(
             description=(
                 f"🎨 **Дизайнер {inter.author.mention} взял ваш заказ в работу!**\n"
@@ -357,12 +357,13 @@ class TicketControlView(ui.View):
             )
         )
         designer_embed.set_footer(text="Heavenly Design © 2026")
-        await inter.channel.send(embed=designer_embed)
+        await inter.channel.send(content=customer_mention, embed=designer_embed)
 
     @ui.button(label="✅ Оплата получена", custom_id="payment_received", style=ButtonStyle.success)
     async def payment_received(self, button: ui.Button, inter: disnake.MessageInteraction):
-        if not is_staff(inter.author):
-            await inter.response.send_message("❌ Только администрация может подтвердить оплату.", ephemeral=True)
+        # Подтвердить оплату могут ТОЛЬКО администраторы
+        if not inter.author.guild_permissions.administrator:
+            await inter.response.send_message("❌ Только администраторы могут подтвердить оплату.", ephemeral=True)
             return
 
         order = await get_order_db(inter.channel.id)
@@ -381,15 +382,16 @@ class TicketControlView(ui.View):
 
         await inter.response.edit_message(view=self)
 
+        customer_mention = f"<@{order['customer_id']}>"
         confirm_embed = Embed(
             description=(
                 "### 💳 Оплата подтверждена!\n"
                 f"Подтвердил: {inter.author.mention}\n\n"
-                "-# Дизайнер приступит к работе в ближайшее время."
+                f"-# Дизайнер приступит к работе в ближайшее время."
             )
         )
         confirm_embed.set_footer(text="Heavenly Design © 2026")
-        await inter.channel.send(embed=confirm_embed)
+        await inter.channel.send(content=customer_mention, embed=confirm_embed)
 
     @ui.button(label="📦 Сдать работу", custom_id="submit_work", style=ButtonStyle.primary)
     async def submit_work(self, button: ui.Button, inter: disnake.MessageInteraction):
@@ -427,7 +429,18 @@ class TicketControlView(ui.View):
             color=disnake.Color.green()
         )
         work_done_embed.set_footer(text="Heavenly Design © 2026")
-        await inter.channel.send(content=customer_mention, embed=work_done_embed)
+        
+        # Отправляем сообщение о сдаче работы ВМЕСТЕ с кнопкой завершения
+        await inter.channel.send(
+            content=customer_mention,
+            embed=work_done_embed,
+            view=CompleteOrderView()
+        )
+
+
+class CompleteOrderView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
 
     @ui.button(label="🔒 Завершить заказ", custom_id="close_ticket", style=ButtonStyle.danger)
     async def close_ticket(self, button: ui.Button, inter: disnake.MessageInteraction):
@@ -506,6 +519,7 @@ class ReviewModal(ui.Modal):
             ephemeral=True,
         )
 
+        customer_mention = f"<@{self.order_data['customer_id']}>"
         close_embed = Embed(
             description=(
                 "### 🎉 Заказ завершён!\n"
@@ -514,7 +528,7 @@ class ReviewModal(ui.Modal):
             )
         )
         close_embed.set_footer(text="Heavenly Design © 2026")
-        await inter.channel.send(embed=close_embed)
+        await inter.channel.send(content=customer_mention, embed=close_embed)
 
         await delete_order_db(inter.channel.id)
         await asyncio.sleep(5)
@@ -571,6 +585,7 @@ class Order(Cog):
                     pass
 
             if channel:
+                customer_mention = f"<@{customer_id}>"
                 close_embed = Embed(
                     description=(
                         "### ⏱️ Время на проверку истекло!\n"
@@ -580,7 +595,7 @@ class Order(Cog):
                 )
                 close_embed.set_footer(text="Heavenly Design © 2026")
                 try:
-                    await channel.send(embed=close_embed)
+                    await channel.send(content=customer_mention, embed=close_embed)
                 except Exception:
                     pass
 
@@ -601,6 +616,7 @@ class Order(Cog):
         await init_db()
         self.bot.add_view(StartButton())
         self.bot.add_view(TicketControlView())
+        self.bot.add_view(CompleteOrderView())
 
     @commands.command(name="panel")
     async def panel(self, ctx: commands.Context):
