@@ -337,6 +337,10 @@ class TicketControlView(ui.View):
             await inter.response.send_message("❌ Заказ не найден в базе данных.", ephemeral=True)
             return
 
+        if inter.author.id == order["customer_id"]:
+            await inter.response.send_message("❌ Ты че, сам у себя заказ брать собрался?", ephemeral=True)
+            return
+
         if order.get("designer_id"):
             await inter.response.send_message("❌ За этот заказ уже взялся другой дизайнер.", ephemeral=True)
             return
@@ -361,7 +365,6 @@ class TicketControlView(ui.View):
 
     @ui.button(label="✅ Оплата получена", custom_id="payment_received", style=ButtonStyle.success)
     async def payment_received(self, button: ui.Button, inter: disnake.MessageInteraction):
-        # Подтвердить оплату могут ТОЛЬКО администраторы
         if not inter.author.guild_permissions.administrator:
             await inter.response.send_message("❌ Только администраторы могут подтвердить оплату.", ephemeral=True)
             return
@@ -430,7 +433,6 @@ class TicketControlView(ui.View):
         )
         work_done_embed.set_footer(text="Heavenly Design © 2026")
         
-        # Отправляем сообщение о сдаче работы ВМЕСТЕ с кнопкой завершения
         await inter.channel.send(
             content=customer_mention,
             embed=work_done_embed,
