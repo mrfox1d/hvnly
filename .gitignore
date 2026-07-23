@@ -1,0 +1,27 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Environment variables & Secrets (Токены и ключи)
+.env
+.env.*
+!.env.example
+
+# Databases
+*.db
+*.sqlite3
+database.db
+
+# IDEs & Editors (PyCharm, VS Code)
+.idea/
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
