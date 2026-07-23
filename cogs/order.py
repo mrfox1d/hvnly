@@ -1,7 +1,7 @@
 import asyncio
 import aiosqlite
 import disnake
-from disnake.ext import commands
+from disnake.ext import commands, tasks
 from disnake.ext.commands import Cog
 from disnake import ui, SelectOption, Embed, ButtonStyle, TextInputStyle
 
@@ -41,6 +41,7 @@ REQUISITES = {
     "gold":   f"⚠️ Gold Standoff 2 {GOLD_EMOJI} — реквизиты выставляются автоматически через API скинов.",
 }
 
+
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -54,6 +55,7 @@ async def init_db():
                 price INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'unpaid',
                 designer_id INTEGER,
+                work_done_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -61,7 +63,12 @@ async def init_db():
             await db.execute("ALTER TABLE orders ADD COLUMN designer_id INTEGER")
         except aiosqlite.OperationalError:
             pass
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN work_done_at TIMESTAMP")
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
+
 
 async def create_order_db(channel_id: int, customer_id: int, task: str, service: str, difficulty: str, currency: str, price: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -71,9 +78,10 @@ async def create_order_db(channel_id: int, customer_id: int, task: str, service:
         )
         await db.commit()
 
+
 async def get_order_db(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT customer_id, task, service, difficulty, currency, price, status, designer_id FROM orders WHERE channel_id = ?", (channel_id,)) as cursor:
+        async with db.execute("SELECT customer_id, task, service, difficulty, currency, price, status, designer_id, work_done_at FROM orders WHERE channel_id = ?", (channel_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
                 return {
@@ -84,24 +92,48 @@ async def get_order_db(channel_id: int):
                     "currency": row[4],
                     "price": row[5],
                     "status": row[6],
-                    "designer_id": row[7]
+                    "designer_id": row[7],
+                    "work_done_at": row[8]
                 }
             return None
+
 
 async def update_order_status_db(channel_id: int, status: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE orders SET status = ? WHERE channel_id = ?", (status, channel_id))
         await db.commit()
 
+
 async def assign_designer_db(channel_id: int, designer_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE orders SET designer_id = ?, status = 'in_progress' WHERE channel_id = ?", (designer_id, channel_id))
         await db.commit()
 
+
+async def mark_work_done_db(channel_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE orders SET status = 'work_done', work_done_at = CURRENT_TIMESTAMP WHERE channel_id = ?", (channel_id,))
+        await db.commit()
+
+
+async def get_expired_orders_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        # 259200 секунд = 3 суток
+        async with db.execute("""
+            SELECT channel_id, customer_id, service, difficulty, currency, price, designer_id 
+            FROM orders 
+            WHERE status = 'work_done' 
+              AND work_done_at IS NOT NULL 
+              AND (strftime('%s', 'now') - strftime('%s', work_done_at)) >= 259200
+        """) as cursor:
+            return await cursor.fetchall()
+
+
 async def delete_order_db(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM orders WHERE channel_id = ?", (channel_id,))
         await db.commit()
+
 
 def is_staff(member: disnake.Member) -> bool:
     role_ids = {r.id for r in member.roles}
@@ -236,7 +268,7 @@ class OrderModal(ui.Modal):
 
         try:
             ticket_channel = await guild.create_text_channel(
-                name=f"🛒・{customer.display_name}",
+                name=f"заказ-{customer.display_name}",
                 category=category,
                 overwrites=overwrites,
                 reason=f"Заказ от {customer}",
@@ -338,7 +370,7 @@ class TicketControlView(ui.View):
             await inter.response.send_message("❌ Заказ не найден в базе данных.", ephemeral=True)
             return
 
-        if order["status"] == "paid":
+        if order["status"] in ["paid", "work_done"]:
             await inter.response.send_message("ℹ️ Оплата уже была подтверждена.", ephemeral=True)
             return
 
@@ -346,10 +378,6 @@ class TicketControlView(ui.View):
 
         button.disabled = True
         button.label = "✅ Оплата подтверждена"
-
-        for item in self.children:
-            if getattr(item, "custom_id", None) == "close_ticket":
-                item.disabled = False
 
         await inter.response.edit_message(view=self)
 
@@ -363,49 +391,57 @@ class TicketControlView(ui.View):
         confirm_embed.set_footer(text="Heavenly Design © 2026")
         await inter.channel.send(embed=confirm_embed)
 
-    @ui.button(label="🔒 Завершить заказ", custom_id="close_ticket", style=ButtonStyle.danger, disabled=True)
+    @ui.button(label="📦 Сдать работу", custom_id="submit_work", style=ButtonStyle.primary)
+    async def submit_work(self, button: ui.Button, inter: disnake.MessageInteraction):
+        order = await get_order_db(inter.channel.id)
+        if not order:
+            await inter.response.send_message("❌ Заказ не найден в базе данных.", ephemeral=True)
+            return
+
+        is_designer = order.get("designer_id") == inter.author.id
+        if not is_designer and not is_staff(inter.author):
+            await inter.response.send_message("❌ Только назначенный дизайнер или администрация может сдать работу.", ephemeral=True)
+            return
+
+        if order["status"] == "work_done":
+            await inter.response.send_message("ℹ️ Работа уже отмечена как выполненная.", ephemeral=True)
+            return
+
+        await mark_work_done_db(inter.channel.id)
+
+        button.disabled = True
+        button.label = "📦 Работа сдана"
+
+        await inter.response.edit_message(view=self)
+
+        customer_mention = f"<@{order['customer_id']}>"
+        work_done_embed = Embed(
+            description=(
+                f"### 🎨 Работа выполнена!\n"
+                f"Уважаемый {customer_mention}, дизайнер сообщил о завершении вашего заказа.\n\n"
+                f"**Что нужно сделать:**\n"
+                f"1. Проверьте готовый результат.\n"
+                f"2. Если всё отлично, нажмите кнопку **«🔒 Завершить заказ»** ниже и оставьте отзыв.\n\n"
+                f"⏱️ **Важно:** У вас есть **3 суток** на проверку. Если заказ не будет завершён вручную, через 3 дня он подтвердится **автоматически**."
+            ),
+            color=disnake.Color.green()
+        )
+        work_done_embed.set_footer(text="Heavenly Design © 2026")
+        await inter.channel.send(content=customer_mention, embed=work_done_embed)
+
+    @ui.button(label="🔒 Завершить заказ", custom_id="close_ticket", style=ButtonStyle.danger)
     async def close_ticket(self, button: ui.Button, inter: disnake.MessageInteraction):
         order = await get_order_db(inter.channel.id)
         if not order:
             await inter.response.send_message("❌ Заказ не найден в базе данных.", ephemeral=True)
             return
 
-        is_customer = inter.author.id == order["customer_id"]
-        if not is_customer and not is_staff(inter.author):
-            await inter.response.send_message("❌ Только заказчик или администрация может закрыть тикет.", ephemeral=True)
+        # ЗАВЕРШИТЬ МОЖЕТ ТОЛЬКО КЛИЕНТ
+        if inter.author.id != order["customer_id"]:
+            await inter.response.send_message("❌ Завершить заказ и оставить отзыв может **только клиент**.", ephemeral=True)
             return
 
-        if order["status"] != "paid" and order["status"] != "in_progress":
-            await inter.response.send_message("❌ Тикет можно закрыть только после подтверждения оплаты.", ephemeral=True)
-            return
-
-        await inter.response.send_message(
-            embed=Embed(description="⚠️ Вы уверены, что хотите завершить заказ и закрыть тикет?").set_footer(text="Heavenly Design © 2026"),
-            view=ConfirmCloseView(customer_id=order["customer_id"], order_data=order),
-            ephemeral=True,
-        )
-
-
-class ConfirmCloseView(ui.View):
-    def __init__(self, customer_id: int, order_data: dict):
-        super().__init__(timeout=60)
-        self.customer_id = customer_id
-        self.order_data = order_data
-
-    @ui.button(label="Да, завершить", style=ButtonStyle.danger, emoji="🔒")
-    async def confirm(self, button: ui.Button, inter: disnake.MessageInteraction):
-        if inter.author.id != self.customer_id and not is_staff(inter.author):
-            await inter.response.send_message("❌ Недостаточно прав.", ephemeral=True)
-            return
-
-        await inter.response.send_modal(modal=ReviewModal(order_data=self.order_data))
-
-    @ui.button(label="Отмена", style=ButtonStyle.secondary, emoji="↩️")
-    async def cancel(self, button: ui.Button, inter: disnake.MessageInteraction):
-        await inter.response.edit_message(
-            embed=Embed(description="↩️ Закрытие отменено.").set_footer(text="Heavenly Design © 2026"),
-            view=None,
-        )
+        await inter.response.send_modal(modal=ReviewModal(order_data=order))
 
 
 class ReviewModal(ui.Modal):
@@ -491,6 +527,74 @@ class ReviewModal(ui.Modal):
 class Order(Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.auto_close_check.start()
+
+    def cog_unload(self):
+        self.auto_close_check.cancel()
+
+    @tasks.loop(minutes=15)
+    async def auto_close_check(self):
+        """Проверка заказов, у которых прошло 3 суток со дня сдачи работы"""
+        expired_orders = await get_expired_orders_db()
+        for row in expired_orders:
+            channel_id, customer_id, service, difficulty, currency, price, designer_id = row
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                try:
+                    channel = await self.bot.fetch_channel(channel_id)
+                except Exception:
+                    channel = None
+
+            designer_mention = f"<@{designer_id}>" if designer_id else "Не назначен"
+
+            reviews_channel = self.bot.get_channel(1529563365708660947)
+            if reviews_channel:
+                rev_embed = Embed(
+                    description=(
+                        f"### ⭐ Автоматическое завершение заказа!\n"
+                        f"**Заказчик:** <@{customer_id}>\n"
+                        f"**Дизайнер:** {designer_mention}\n\n"
+                        f"**⚙️ Информация о заказе:**\n"
+                        f"・Услуга: **{service}**\n"
+                        f"・Сложность: **{difficulty}**\n"
+                        f"・Стоимость: **{price}** ({currency})\n\n"
+                        f"**Оценка:** ⭐⭐⭐⭐⭐ (Авто-подтверждение)\n"
+                        f"**💬 Комментарий:**\nЗаказ автоматически закрыт по истечению 3 суток после сдачи работы."
+                    )
+                )
+                if channel and channel.guild:
+                    rev_embed.set_author(name=channel.guild.name, icon_url=channel.guild.icon.url if channel.guild.icon else None)
+                rev_embed.set_footer(text="Heavenly Design © 2026")
+                try:
+                    await reviews_channel.send(embed=rev_embed)
+                except Exception:
+                    pass
+
+            if channel:
+                close_embed = Embed(
+                    description=(
+                        "### ⏱️ Время на проверку истекло!\n"
+                        "Заказ был автоматически закрыт и подтверждён, так как прошло 3 суток после сдачи работы.\n\n"
+                        "-# Канал будет удалён через 5 секунд."
+                    )
+                )
+                close_embed.set_footer(text="Heavenly Design © 2026")
+                try:
+                    await channel.send(embed=close_embed)
+                except Exception:
+                    pass
+
+            await delete_order_db(channel_id)
+            await asyncio.sleep(5)
+            if channel:
+                try:
+                    await channel.delete(reason="Автоматическое закрытие заказа (3 дня без ответа)")
+                except Exception:
+                    pass
+
+    @auto_close_check.before_loop
+    async def before_auto_close_check(self):
+        await self.bot.wait_until_ready()
 
     @Cog.listener()
     async def on_ready(self):
@@ -517,7 +621,7 @@ class Order(Cog):
 
         embed.add_field(
             name="💳 Способы оплаты",
-            value="```RUB (₽) | UAH (₴) | Gold```",
+            value="**RUB (₽)** | **UAH (₴)** | **Gold <:gold:1529803326898831400>**",
             inline=False
         )
 
