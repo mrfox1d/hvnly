@@ -464,7 +464,7 @@ class Commands(Cog):
         await send_log(self.bot, log_embed)
 
     @command(name="clear", aliases=["очистить", "purge"])
-    @has_permissions(delete_messages=True)
+    @has_permissions(manage_messages=True)
     async def clear(self, ctx, amount: int = 1):
         deleted = await ctx.channel.purge(limit=amount + 1)
         count = len(deleted) - 1
@@ -480,7 +480,7 @@ class Commands(Cog):
         await send_log(self.bot, log_embed)
 
     @slash_command(name="clear", description="Очистить чат от сообщений")
-    @has_permissions(delete_messages=True)
+    @has_permissions(manage_messages=True)
     async def slash_clear(self, inter: disnake.ApplicationCommandInteraction, amount: int = 1):
         await inter.response.defer(ephemeral=True)
         deleted = await inter.channel.purge(limit=amount)
