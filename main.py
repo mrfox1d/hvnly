@@ -15,7 +15,7 @@ bot = commands.Bot(command_prefix=".", intents=Intents.all(),
 
 @bot.event
 async def on_ready():
-    init_db()
+    await init_db()
     print(f"Logged in as {bot.user}")
 
 bot.load_extensions("cogs")

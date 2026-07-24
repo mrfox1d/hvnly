@@ -1,8 +1,8 @@
 import disnake
 from disnake.ext import commands
 
-AUTOROLE_ID = 1529869975513468949 
-BOT_ROLE_ID = 1529564768354959481
+AUTOROLE_ID = 1529564768354959481
+BOT_ROLE_ID = 1529869975513468949
 
 class AutoRole(commands.Cog):
     def __init__(self, bot: commands.Bot):

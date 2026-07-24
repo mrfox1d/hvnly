@@ -14,6 +14,8 @@ COLOR_ERROR = disnake.Color.brand_red()
 COLOR_SUCCESS = disnake.Color.green()
 
 URL_REGEX = re.compile(r"(https?://[^\s]+|www\.[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)", re.IGNORECASE)
+# Регулярка для точного подсчёта ВСЕХ тегов (включая повторы и роли)
+MENTION_REGEX = re.compile(r"<@!?\d+>|<@&\d+>|@everyone|@here")
 
 
 def get_warning_ending(count: int) -> str:
@@ -171,15 +173,16 @@ class Commands(Cog):
         self.bot = bot
         self.spam_cache = defaultdict(list)
 
-    @Cog.listener()
-    async def on_message(self, message: disnake.Message):
+    async def _check_automod(self, message: disnake.Message) -> bool:
+        """Проверка сообщения на нарушения. Возвращает True, если было найдено нарушение."""
         if message.author.bot or not message.guild:
-            return
+            return False
         if message.author.guild_permissions.administrator:
-            return
+            return False
 
         settings = await get_all_settings()
 
+        # 1. Спам
         if settings.get("spam", True):
             now = time.time()
             user_msgs = [t for t in self.spam_cache[message.author.id] if now - t <= 2.0]
@@ -193,18 +196,20 @@ class Commands(Cog):
                 except disnake.HTTPException:
                     pass
                 await self._trigger_automod(message, "Спам (5+ сообщений за 2 сек)")
-                return
+                return True
 
+        # 2. Массовые упоминания (исправлено через регулярку)
         if settings.get("massmention", True):
-            mentions_count = len(message.mentions) + len(message.role_mentions) + (1 if message.mention_everyone else 0)
+            mentions_count = len(MENTION_REGEX.findall(message.content))
             if mentions_count >= 6:
                 try:
                     await message.delete()
                 except disnake.HTTPException:
                     pass
                 await self._trigger_automod(message, f"Массовые упоминания ({mentions_count} тегов)")
-                return
+                return True
 
+        # 3. Капс
         if settings.get("caps", True):
             letters = [c for c in message.content if c.isalpha()]
             if len(letters) >= 6:
@@ -216,8 +221,9 @@ class Commands(Cog):
                     except disnake.HTTPException:
                         pass
                     await self._trigger_automod(message, f"Злоупотребление капсом ({int(ratio * 100)}%)")
-                    return
+                    return True
 
+        # 4. Запрещённые ссылки
         if settings.get("links", True):
             urls = URL_REGEX.findall(message.content)
             if urls:
@@ -228,7 +234,67 @@ class Commands(Cog):
                     except disnake.HTTPException:
                         pass
                     await self._trigger_automod(message, "Отправка запрещённых ссылок")
-                    return
+                    return True
+
+        return False
+
+    @Cog.listener()
+    async def on_message(self, message: disnake.Message):
+        await self._check_automod(message)
+
+    @Cog.listener()
+    async def on_message_delete(self, message: disnake.Message):
+        if message.author.bot or not message.guild:
+            return
+
+        content = message.content if message.content else "*Сообщение не содержало текста (вложения/эмбед)*"
+        if len(content) > 1024:
+            content = content[:1021] + "..."
+
+        embed = disnake.Embed(
+            title="🗑️ Сообщение удалено",
+            color=COLOR_ERROR
+        )
+        embed.add_field(name="Автор", value=f"{message.author.mention} (`{message.author.id}`)", inline=True)
+        embed.add_field(name="Канал", value=message.channel.mention, inline=True)
+        embed.add_field(name="Содержимое", value=content, inline=False)
+        embed.set_footer(text="Heavenly Design © 2026", icon_url=self.bot.user.display_avatar.url)
+
+        await send_log(self.bot, embed)
+
+    @Cog.listener()
+    async def on_message_edit(self, before: disnake.Message, after: disnake.Message):
+        if after.author.bot or not after.guild:
+            return
+        if before.content == after.content:
+            return
+
+        # Сначала проверяем изменённое сообщение на нарушения
+        violated = await self._check_automod(after)
+        if violated:
+            return  # Если было нарушение, сообщение удалено и залогировано автомодерацией
+
+        # Логируем обычное изменение сообщения
+        before_text = before.content if before.content else "*Пусто*"
+        after_text = after.content if after.content else "*Пусто*"
+
+        if len(before_text) > 1024:
+            before_text = before_text[:1021] + "..."
+        if len(after_text) > 1024:
+            after_text = after_text[:1021] + "..."
+
+        embed = disnake.Embed(
+            title="✏️ Сообщение отредактировано",
+            color=COLOR_MAIN
+        )
+        embed.add_field(name="Автор", value=f"{after.author.mention} (`{after.author.id}`)", inline=True)
+        embed.add_field(name="Канал", value=after.channel.mention, inline=True)
+        embed.add_field(name="Перейти", value=f"[Перейти к сообщению]({after.jump_url})", inline=False)
+        embed.add_field(name="До", value=before_text, inline=False)
+        embed.add_field(name="После", value=after_text, inline=False)
+        embed.set_footer(text="Heavenly Design © 2026", icon_url=self.bot.user.display_avatar.url)
+
+        await send_log(self.bot, embed)
 
     async def _trigger_automod(self, message: disnake.Message, reason: str):
         await give_warning(message.author.id, reason)
