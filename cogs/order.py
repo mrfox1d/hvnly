@@ -41,35 +41,6 @@ REQUISITES = {
     "gold":   f"⚠️ Gold Standoff 2 {GOLD_EMOJI} — реквизиты выставляются автоматически через API скинов.",
 }
 
-
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                channel_id INTEGER PRIMARY KEY,
-                customer_id INTEGER NOT NULL,
-                task TEXT NOT NULL,
-                service TEXT NOT NULL,
-                difficulty TEXT NOT NULL,
-                currency TEXT NOT NULL,
-                price INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'unpaid',
-                designer_id INTEGER,
-                work_done_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        try:
-            await db.execute("ALTER TABLE orders ADD COLUMN designer_id INTEGER")
-        except aiosqlite.OperationalError:
-            pass
-        try:
-            await db.execute("ALTER TABLE orders ADD COLUMN work_done_at TIMESTAMP")
-        except aiosqlite.OperationalError:
-            pass
-        await db.commit()
-
-
 async def create_order_db(channel_id: int, customer_id: int, task: str, service: str, difficulty: str, currency: str, price: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -615,7 +586,6 @@ class Order(Cog):
 
     @Cog.listener()
     async def on_ready(self):
-        await init_db()
         self.bot.add_view(StartButton())
         self.bot.add_view(TicketControlView())
         self.bot.add_view(CompleteOrderView())

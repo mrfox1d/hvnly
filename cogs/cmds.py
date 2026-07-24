@@ -26,20 +26,6 @@ def get_warning_ending(count: int) -> str:
         return "я"
     return "й"
 
-
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""CREATE TABLE IF NOT EXISTS warnings (
-            user_id INTEGER PRIMARY KEY,
-            warnings INTEGER NOT NULL DEFAULT 0
-        )""")
-        await db.execute("""CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value INTEGER NOT NULL DEFAULT 1
-        )""")
-        await db.commit()
-
-
 async def give_warning(user_id: int, reason: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
