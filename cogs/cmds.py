@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 import aiosqlite
 import disnake
-from disnake.ext.commands import Bot, Cog, command, slash_command, has_permissions, errors
+from disnake.ext.commands import Bot, Cog, command, slash_command, has_permissions, errors, Param
 
 DB_PATH = "database.db"
 LOG_CHANNEL_ID = 1530086386173087774
@@ -588,6 +588,31 @@ class Commands(Cog):
         embed.set_footer(text="Heavenly Design © 2026", icon_url=self.bot.user.display_avatar.url)
         await channel.send(content=target.mention, embed=embed)
 
+    @slash_command(name="pf", description="Добавить работу в своё портфолио (только для Pharos'а)")
+    async def portfolio_add(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        attachment: disnake.Attachment,
+        description: str = Param(description="Краткое описание работы", max_length=500),
+    ):
+        if inter.author.id != 1160681372252393492:
+            await inter.response.send_message("❌ Эта команда доступна только Главному Дизайнеру.", ephemeral=True)
+            return
+        
+        showcase_channel = inter.guild.get_channel(1530600614864883774)
+        if showcase_channel:
+            try:
+                pharos = await inter.author()
+                embed = disnake.Embed(
+                    title = "🎨 Новая работа от Гл. Дизайнера!",
+                    description = f"**Наш главный дизайнер {pharos.mention} сделал новую работу!**\n\n**Описание:** {description}",
+                    color = disnake.Color.green()
+                )
+                embed.set_image(url=attachment.url)
+                msg = await showcase_channel.send(embed=embed)
+
+            except disnake.HTTPException:
+                pass
 
 def setup(bot: Bot):
     bot.add_cog(Commands(bot))
