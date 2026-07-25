@@ -16,23 +16,23 @@ DB_PATH = "database.db"
 GOLD_EMOJI = "<:gold:1529803326898831400>"
 
 SERVICES = {
-    "avatar": {"name": "Аватарка", "price": 135},
-    "banner": {"name": "Баннер", "price": 150},
-    "pack":   {"name": "Аватарка + Баннер", "price": 260},
-    "vk":     {"name": "Оформление VK сообщества", "price": 300},
-    "custom": {"name": "Другое / Индивидуально", "price": 200},
+    "avatar": {"name": "Аватарка"},
+    "banner": {"name": "Баннер"},
+    "pack":   {"name": "Аватарка + Баннер"},
+    "vk":     {"name": "Оформление VK сообщества"},
+    "custom": {"name": "Другое / Индивидуально"},
 }
 
 DIFFICULTIES = {
-    "easy":   {"name": "Простая (минимализм)", "mult": 1.0},
-    "medium": {"name": "Средняя (стандарт)", "mult": 1.2},
-    "hard":   {"name": "Сложная (детализированная / 3D)", "mult": 1.5},
+    "easy":   {"name": "Простая (минимализм)"},
+    "medium": {"name": "Средняя (стандарт)"},
+    "hard":   {"name": "Сложная (детализированная / 3D)"},
 }
 
 CURRENCY_RATES = {
-    "rub":    {"label": "Рубли (₽)", "rate": 1.0, "symbol": "₽"},
-    "hryvna": {"label": "Гривны (₴)", "rate": 0.45, "symbol": "₴"},
-    "gold":   {"label": "Gold Standoff 2", "rate": 1.0, "symbol": "G"},
+    "rub":    {"label": "Рубли (₽)", "symbol": "₽"},
+    "hryvna": {"label": "Гривны (₴)", "symbol": "₴"},
+    "gold":   {"label": "Gold Standoff 2", "symbol": GOLD_EMOJI},
 }
 
 REQUISITES = {
@@ -41,11 +41,12 @@ REQUISITES = {
     "gold":   f"⚠️ Gold Standoff 2 {GOLD_EMOJI} — реквизиты выставляются автоматически через API скинов.",
 }
 
-async def create_order_db(channel_id: int, customer_id: int, task: str, service: str, difficulty: str, currency: str, price: int):
+
+async def create_order_db(channel_id: int, customer_id: int, task: str, service: str, difficulty: str, currency: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO orders (channel_id, customer_id, task, service, difficulty, currency, price, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'unpaid')",
-            (channel_id, customer_id, task, service, difficulty, currency, price)
+            "INSERT INTO orders (channel_id, customer_id, task, service, difficulty, currency, price, status) VALUES (?, ?, ?, ?, ?, ?, NULL, 'unpaid')",
+            (channel_id, customer_id, task, service, difficulty, currency)
         )
         await db.commit()
 
@@ -81,6 +82,12 @@ async def assign_designer_db(channel_id: int, designer_id: int):
         await db.commit()
 
 
+async def set_price_db(channel_id: int, price: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE orders SET price = ? WHERE channel_id = ?", (price, channel_id))
+        await db.commit()
+
+
 async def mark_work_done_db(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE orders SET status = 'work_done', work_done_at = CURRENT_TIMESTAMP WHERE channel_id = ?", (channel_id,))
@@ -110,6 +117,34 @@ def is_staff(member: disnake.Member) -> bool:
     return bool(role_ids & ALLOWED_ROLE_IDS) or member.guild_permissions.administrator
 
 
+def format_price(price, currency_key: str) -> str:
+    if price is None:
+        return "уточняется у дизайнера"
+    symbol = CURRENCY_RATES.get(currency_key, {}).get("symbol", "")
+    return f"{price} {symbol}".strip()
+
+
+async def _credit_review_to_designer(designer_id: int, client_id: int, rating: int, comment: str):
+    """Начисляет отзыв дизайнеру в базу portfolio.py (рейтинг в /profile).
+    Пробует относительный импорт (если order.py и portfolio.py лежат в одном
+    пакете cogs) и абсолютный (если portfolio.py доступен как отдельный модуль).
+    Ошибки логируются в консоль, а не проглатываются молча."""
+    add_review_fn = None
+    try:
+        from .portfolio import add_review as add_review_fn  # type: ignore
+    except ImportError:
+        try:
+            from portfolio import add_review as add_review_fn  # type: ignore
+        except ImportError as e:
+            print(f"[Order] Не удалось импортировать add_review из portfolio.py: {e}")
+            return
+
+    try:
+        await add_review_fn(designer_id, client_id, rating, comment)
+    except Exception as e:
+        print(f"[Order] Ошибка при начислении отзыва дизайнеру {designer_id}: {e}")
+
+
 class StartButton(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -119,7 +154,8 @@ class StartButton(ui.View):
         embed = Embed(
             description=(
                 "### 🎨 Шаг 1: Параметры заказа\n"
-                "Выберите **тип работы**, **сложность** и **валюту оплаты**, а затем нажмите кнопку ввода ТЗ."
+                "Выберите **тип работы**, **сложность** и **валюту оплаты**, а затем нажмите кнопку ввода ТЗ.\n\n"
+                "-# Итоговую стоимость назначит дизайнер после ознакомления с ТЗ."
             )
         )
         embed.set_footer(text="Heavenly Design © 2026")
@@ -141,10 +177,10 @@ class OrderConfigView(ui.View):
     @ui.select(
         placeholder="1. Выберите тип работы…",
         options=[
-            SelectOption(label="Аватарка", value="avatar", description="От ~135 ₽", emoji="🖼️"),
-            SelectOption(label="Баннер", value="banner", description="От ~150 ₽", emoji="🎨"),
-            SelectOption(label="Аватарка + Баннер", value="pack", description="От ~260 ₽", emoji="📦"),
-            SelectOption(label="Оформление VK", value="vk", description="От ~300 ₽", emoji="🌐"),
+            SelectOption(label="Аватарка", value="avatar", emoji="🖼️"),
+            SelectOption(label="Баннер", value="banner", emoji="🎨"),
+            SelectOption(label="Аватарка + Баннер", value="pack", emoji="📦"),
+            SelectOption(label="Оформление VK", value="vk", emoji="🌐"),
             SelectOption(label="Другое", value="custom", description="Индивидуальная работа", emoji="⚙️"),
         ],
         custom_id="select_service"
@@ -213,16 +249,9 @@ class OrderModal(ui.Modal):
         task = inter.text_values["task_input"]
 
         await inter.response.send_message(
-            embed=Embed(description="⏳ Создаём тикет и рассчитываем стоимость…").set_footer(text="Heavenly Design © 2026"),
+            embed=Embed(description="⏳ Создаём тикет…").set_footer(text="Heavenly Design © 2026"),
             ephemeral=True,
         )
-
-        base_price = SERVICES[self.service]["price"]
-        mult = DIFFICULTIES[self.difficulty]["mult"]
-        rate = CURRENCY_RATES[self.currency]["rate"]
-        symbol = GOLD_EMOJI if self.currency == "gold" else CURRENCY_RATES[self.currency]["symbol"]
-
-        final_price = int(round((base_price * mult) * rate))
 
         guild = inter.guild
         customer = inter.author
@@ -253,10 +282,9 @@ class OrderModal(ui.Modal):
             channel_id=ticket_channel.id,
             customer_id=customer.id,
             task=task,
-            service=SERVICES[self.service]['name'],
+            service=self.service,
             difficulty=DIFFICULTIES[self.difficulty]['name'],
-            currency=CURRENCY_RATES[self.currency]['label'],
-            price=final_price
+            currency=self.currency,
         )
 
         ticket_embed = Embed(
@@ -268,9 +296,8 @@ class OrderModal(ui.Modal):
                 f"・Сложность: **{DIFFICULTIES[self.difficulty]['name']}**\n"
                 f"・Валюта: **{CURRENCY_RATES[self.currency]['label']}**\n\n"
                 f"**📝 Техническое задание:**\n{task}\n\n"
-                f"**💰 Рассчитанная стоимость:** `{final_price}` {symbol}\n\n"
-                f"**📦 Реквизиты для оплаты:**\n{REQUISITES[self.currency]}\n\n"
-                f"-# После оплаты нажмите «Оплата получена» (выполняется администрацией)."
+                f"**💰 Стоимость:** будет назначена дизайнером после взятия заказа в работу.\n\n"
+                f"-# Как только дизайнер нажмёт «✋ Взяться за заказ» и укажет цену, здесь появятся реквизиты для оплаты."
             )
         )
         ticket_embed.set_author(name=guild.name, icon_url=guild.icon.url)
@@ -285,12 +312,117 @@ class OrderModal(ui.Modal):
         done_embed = Embed(
             description=(
                 f"### ✅ Тикет создан!\n"
-                f"Перейдите в канал {ticket_channel.mention} — там указаны подробности заказа и реквизиты.\n\n"
-                f"-# Как оплатите, сообщите администратору в тикете."
+                f"Перейдите в канал {ticket_channel.mention} — там указаны подробности заказа.\n\n"
+                f"-# Дизайнер, который возьмётся за заказ, назначит стоимость и реквизиты появятся в тикете."
             )
         )
         done_embed.set_footer(text="Heavenly Design © 2026")
         await inter.edit_original_response(embed=done_embed)
+
+
+class TakeOrderPriceModal(ui.Modal):
+    """Открывается сразу при взятии заказа в работу: дизайнер сначала называет
+    стоимость, и только после этого он фиксируется как назначенный дизайнер."""
+
+    def __init__(self, order_data: dict, designer: disnake.Member, take_button: ui.Button, view: "TicketControlView"):
+        self.order_data = order_data
+        self.designer = designer
+        self.take_button = take_button
+        self.view = view
+        components = [
+            ui.TextInput(
+                label="・Стоимость заказа:",
+                custom_id="price_input",
+                style=TextInputStyle.short,
+                placeholder="Например: 200",
+                max_length=10,
+                required=True,
+            )
+        ]
+        super().__init__(title="💰 Заказ принят — укажите цену", custom_id="take_order_price_modal", components=components)
+
+    async def callback(self, inter: disnake.ModalInteraction):
+        raw_price = inter.text_values["price_input"].strip()
+        try:
+            price = int(raw_price)
+            if price <= 0:
+                raise ValueError
+        except ValueError:
+            await inter.response.send_message("❌ Введите корректное положительное целое число.", ephemeral=True)
+            return
+
+        # Фиксируем дизайнера и цену только после успешного заполнения модалки
+        await assign_designer_db(inter.channel.id, self.designer.id)
+        await set_price_db(inter.channel.id, price)
+
+        self.take_button.disabled = True
+        self.take_button.label = f"Дизайнер: {self.designer.display_name}"
+        self.take_button.style = ButtonStyle.secondary
+
+        await inter.response.edit_message(view=self.view)
+
+        currency = self.order_data["currency"]
+        symbol = CURRENCY_RATES[currency]["symbol"]
+
+        price_embed = Embed(
+            description=(
+                f"### 🎨 Дизайнер {self.designer.mention} взял заказ в работу!\n"
+                f"Назначенная стоимость: **{price} {symbol}**\n\n"
+                f"**📦 Реквизиты для оплаты:**\n{REQUISITES[currency]}\n\n"
+                f"-# После оплаты нажмите «✅ Оплата получена» (выполняется администрацией)."
+            ),
+            color=disnake.Color.gold()
+        )
+        price_embed.set_footer(text="Heavenly Design © 2026")
+
+        customer_mention = f"<@{self.order_data['customer_id']}>"
+        await inter.followup.send(content=customer_mention, embed=price_embed)
+
+
+class ChangePriceModal(ui.Modal):
+    """Изменение уже назначенной стоимости (когда заказ ещё не оплачен)."""
+
+    def __init__(self, order_data: dict):
+        self.order_data = order_data
+        components = [
+            ui.TextInput(
+                label="・Новая стоимость заказа:",
+                custom_id="price_input",
+                style=TextInputStyle.short,
+                placeholder="Например: 200",
+                max_length=10,
+                required=True,
+            )
+        ]
+        super().__init__(title="🔄 Изменить стоимость", custom_id="change_price_modal", components=components)
+
+    async def callback(self, inter: disnake.ModalInteraction):
+        raw_price = inter.text_values["price_input"].strip()
+        try:
+            price = int(raw_price)
+            if price <= 0:
+                raise ValueError
+        except ValueError:
+            await inter.response.send_message("❌ Введите корректное положительное целое число.", ephemeral=True)
+            return
+
+        await set_price_db(inter.channel.id, price)
+
+        currency = self.order_data["currency"]
+        symbol = CURRENCY_RATES[currency]["symbol"]
+
+        price_embed = Embed(
+            description=(
+                f"### 🔄 Стоимость заказа изменена\n"
+                f"Новая стоимость: **{price} {symbol}**\n\n"
+                f"**📦 Реквизиты для оплаты:**\n{REQUISITES[currency]}"
+            ),
+            color=disnake.Color.gold()
+        )
+        price_embed.set_footer(text="Heavenly Design © 2026")
+
+        customer_mention = f"<@{self.order_data['customer_id']}>"
+        await inter.response.send_message(content=customer_mention, embed=price_embed)
 
 
 class TicketControlView(ui.View):
@@ -316,23 +448,36 @@ class TicketControlView(ui.View):
             await inter.response.send_message("❌ За этот заказ уже взялся другой дизайнер.", ephemeral=True)
             return
 
-        await assign_designer_db(inter.channel.id, inter.author.id)
-
-        button.disabled = True
-        button.label = f"Дизайнер: {inter.author.display_name}"
-        button.style = ButtonStyle.secondary
-
-        await inter.response.edit_message(view=self)
-
-        customer_mention = f"<@{order['customer_id']}>"
-        designer_embed = Embed(
-            description=(
-                f"🎨 **Дизайнер {inter.author.mention} взял ваш заказ в работу!**\n"
-                f"Вы можете обсудить с ним детали напрямую в этом тикете."
-            )
+        # Дизайнер сначала называет цену — назначение произойдёт в модалке после ввода
+        await inter.response.send_modal(
+            modal=TakeOrderPriceModal(order_data=order, designer=inter.author, take_button=button, view=self)
         )
-        designer_embed.set_footer(text="Heavenly Design © 2026")
-        await inter.channel.send(content=customer_mention, embed=designer_embed)
+
+    @ui.button(label="🔄 Изменить стоимость", custom_id="set_price", style=ButtonStyle.secondary)
+    async def set_price(self, button: ui.Button, inter: disnake.MessageInteraction):
+        order = await get_order_db(inter.channel.id)
+        if not order:
+            await inter.response.send_message("❌ Заказ не найден в базе данных.", ephemeral=True)
+            return
+
+        if not order.get("designer_id"):
+            await inter.response.send_message(
+                "❌ Сначала нужно взяться за заказ — цена назначается сразу при взятии.", ephemeral=True
+            )
+            return
+
+        is_designer = order.get("designer_id") == inter.author.id
+        if not is_designer and not is_staff(inter.author):
+            await inter.response.send_message(
+                "❌ Стоимость может изменить только дизайнер, взявший заказ, или администрация.", ephemeral=True
+            )
+            return
+
+        if order["status"] in ("paid", "work_done"):
+            await inter.response.send_message("❌ Заказ уже оплачен, менять стоимость нельзя.", ephemeral=True)
+            return
+
+        await inter.response.send_modal(modal=ChangePriceModal(order_data=order))
 
     @ui.button(label="✅ Оплата получена", custom_id="payment_received", style=ButtonStyle.success)
     async def payment_received(self, button: ui.Button, inter: disnake.MessageInteraction):
@@ -343,6 +488,12 @@ class TicketControlView(ui.View):
         order = await get_order_db(inter.channel.id)
         if not order:
             await inter.response.send_message("❌ Заказ не найден в базе данных.", ephemeral=True)
+            return
+
+        if order["price"] is None:
+            await inter.response.send_message(
+                "❌ Дизайнер ещё не указал стоимость заказа. Сначала назначьте цену.", ephemeral=True
+            )
             return
 
         if order["status"] in ["paid", "work_done"]:
@@ -403,7 +554,7 @@ class TicketControlView(ui.View):
             color=disnake.Color.green()
         )
         work_done_embed.set_footer(text="Heavenly Design © 2026")
-        
+
         await inter.channel.send(
             content=customer_mention,
             embed=work_done_embed,
@@ -466,7 +617,11 @@ class ReviewModal(ui.Modal):
             stars_cnt = 5
 
         stars_str = "⭐" * stars_cnt
-        designer_mention = f"<@{self.order_data['designer_id']}>" if self.order_data.get("designer_id") else "Не назначен"
+        designer_id = self.order_data.get("designer_id")
+        designer_mention = f"<@{designer_id}>" if designer_id else "Не назначен"
+
+        service_name = SERVICES.get(self.order_data['service'], {}).get('name', self.order_data['service'])
+        price_str = format_price(self.order_data['price'], self.order_data['currency'])
 
         reviews_channel = inter.guild.get_channel(1529563365708660947)
         if reviews_channel:
@@ -476,16 +631,23 @@ class ReviewModal(ui.Modal):
                     f"**Заказчик:** {inter.author.mention}\n"
                     f"**Дизайнер:** {designer_mention}\n\n"
                     f"**⚙️ Информация о заказе:**\n"
-                    f"・Услуга: **{self.order_data['service']}**\n"
+                    f"・Услуга: **{service_name}**\n"
                     f"・Сложность: **{self.order_data['difficulty']}**\n"
-                    f"・Стоимость: **{self.order_data['price']}** ({self.order_data['currency']})\n\n"
+                    f"・Стоимость: **{price_str}**\n\n"
                     f"**Оценка:** {stars_str}\n"
                     f"**💬 Комментарий:**\n{review_text}"
                 )
             )
             rev_embed.set_author(name=inter.guild.name, icon_url=inter.guild.icon.url)
             rev_embed.set_footer(text="Heavenly Design © 2026")
-            await reviews_channel.send(embed=rev_embed)
+            await reviews_channel.send(
+                content=designer_mention if designer_id else None,
+                embed=rev_embed
+            )
+
+        # Начисляем отзыв в базу портфолио дизайнера, если designer_id известен
+        if designer_id:
+            await _credit_review_to_designer(designer_id, inter.author.id, stars_cnt, review_text)
 
         await inter.response.send_message(
             embed=Embed(description="🎉 Спасибо за отзыв! Канал будет удалён через 5 секунд.").set_footer(text="Heavenly Design © 2026"),
@@ -533,6 +695,8 @@ class Order(Cog):
                     channel = None
 
             designer_mention = f"<@{designer_id}>" if designer_id else "Не назначен"
+            service_name = SERVICES.get(service, {}).get('name', service)
+            price_str = format_price(price, currency)
 
             reviews_channel = self.bot.get_channel(1529563365708660947)
             if reviews_channel:
@@ -542,9 +706,9 @@ class Order(Cog):
                         f"**Заказчик:** <@{customer_id}>\n"
                         f"**Дизайнер:** {designer_mention}\n\n"
                         f"**⚙️ Информация о заказе:**\n"
-                        f"・Услуга: **{service}**\n"
+                        f"・Услуга: **{service_name}**\n"
                         f"・Сложность: **{difficulty}**\n"
-                        f"・Стоимость: **{price}** ({currency})\n\n"
+                        f"・Стоимость: **{price_str}**\n\n"
                         f"**Оценка:** ⭐⭐⭐⭐⭐ (Авто-подтверждение)\n"
                         f"**💬 Комментарий:**\nЗаказ автоматически закрыт по истечению 3 суток после сдачи работы."
                     )
@@ -553,9 +717,18 @@ class Order(Cog):
                     rev_embed.set_author(name=channel.guild.name, icon_url=channel.guild.icon.url if channel.guild.icon else None)
                 rev_embed.set_footer(text="Heavenly Design © 2026")
                 try:
-                    await reviews_channel.send(embed=rev_embed)
+                    await reviews_channel.send(
+                        content=designer_mention if designer_id else None,
+                        embed=rev_embed
+                    )
                 except Exception:
                     pass
+
+            if designer_id:
+                await _credit_review_to_designer(
+                    designer_id, customer_id, 5,
+                    "Заказ автоматически закрыт по истечению 3 суток после сдачи работы."
+                )
 
             if channel:
                 customer_mention = f"<@{customer_id}>"
@@ -602,7 +775,8 @@ class Order(Cog):
                 "### 📋 **Процесс оформления заказа:**\n"
                 "**1.** Выберите **тип работы**, **сложность** и **валюту**\n"
                 "**2.** Заполните подробное **ТЗ** во всплывающем окне\n"
-                "**3.** Бот автоматически создаст ваш **личный тикет**"
+                "**3.** Бот автоматически создаст ваш **личный тикет**\n"
+                "**4.** Дизайнер, взявший заказ, сам назначит **стоимость**"
             ),
             color=disnake.Color.from_rgb(114, 137, 218)
         )
