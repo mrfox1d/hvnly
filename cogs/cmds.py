@@ -602,14 +602,14 @@ class Commands(Cog):
         showcase_channel = inter.guild.get_channel(1530600614864883774)
         if showcase_channel:
             try:
-                pharos = await inter.author()
                 embed = disnake.Embed(
                     title = "🎨 Новая работа от Гл. Дизайнера!",
-                    description = f"**Наш главный дизайнер {pharos.mention} сделал новую работу!**\n\n**Описание:** {description}",
+                    description = f"**Наш главный дизайнер {inter.author.mention} сделал новую работу!**\n\n**Описание:** {description}",
                     color = disnake.Color.green()
                 )
                 embed.set_image(url=attachment.url)
                 msg = await showcase_channel.send(embed=embed)
+                await inter.response.send_message("Работа успешно отправлена в канал <#1530600614864883774>", ephemeral=True)
 
             except disnake.HTTPException:
                 pass
